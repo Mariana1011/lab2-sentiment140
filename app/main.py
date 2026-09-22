@@ -138,21 +138,36 @@ def get_experiment_or_503():
 
 @app.get("/health")
 def health():
+
+    global model, vectorizer, champion_info
+
     try:
-        champion = client.get_model_version_by_alias(
-            MODEL_NAME,
-            MODEL_ALIAS
+
+        load_champion()
+
+        text = preprocess_text(
+            "this movie was surprisingly good"
         )
 
-        # Comprobamos también que el run exista realmente
-        client.get_run(champion.run_id)
+        X = vectorizer.transform(
+            [text]
+        )
+
+        prediction = model.predict(X)
+
+        if len(prediction) != 1:
+            raise RuntimeError(
+                "inference_failed"
+            )
 
         return {
             "status": "ok",
-            "model_run_id": champion.run_id
+            "model_run_id":
+                champion_info.run_id
         }
 
     except Exception:
+
         from fastapi.responses import JSONResponse
 
         return JSONResponse(
@@ -184,6 +199,35 @@ def predict(request: PredictRequest):
         else request.text
     )
 
+    # Validación explícita del contrato:
+    # 1 a 32 textos, strings no vacíos,
+    # no solo espacios y máximo 1000 caracteres.
+    if not texts or len(texts) > 32:
+        raise HTTPException(
+            status_code=422,
+            detail="invalid_text"
+        )
+
+    for text in texts:
+
+        if not isinstance(text, str):
+            raise HTTPException(
+                status_code=422,
+                detail="invalid_text"
+            )
+
+        if not text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="invalid_text"
+            )
+
+        if len(text) > 1000:
+            raise HTTPException(
+                status_code=422,
+                detail="invalid_text"
+            )
+
     clean_texts = [
         preprocess_text(t)
         for t in texts
@@ -213,16 +257,22 @@ def predict(request: PredictRequest):
 # ============================================================
 
 def _presented_runs(exp):
+
     runs = client.search_runs(
         experiment_ids=[exp.experiment_id],
         max_results=5000
     )
 
-    return [
+    presented = [
         r for r in runs
         if r.data.tags.get("lab_run_type")
         in {"protocol", "experiment", "final"}
     ]
+
+    return sorted(
+        presented,
+        key=lambda r: r.info.run_id
+    )
 
 
 def _artifacts_recursive(run_id):
@@ -455,10 +505,7 @@ def audit_runs():
 
         output = []
 
-        for r in sorted(
-            runs,
-            key=lambda x: x.info.start_time or 0
-        ):
+        for r in runs:
             output.append({
                 "run_id": r.info.run_id,
                 "status": r.info.status,
